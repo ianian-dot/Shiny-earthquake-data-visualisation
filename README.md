@@ -1,4 +1,4 @@
-# Visualising Earthquake data from USGS 
+# Visualising Earthquake data from USGS with R Shiny
 
 Visualise earthquake data in real time from [USGS](https://www.usgs.gov/programs/earthquake-hazards/earthquakes)
 
