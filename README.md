@@ -9,6 +9,13 @@ Steps
 
 [View dashboard](https://jojorabbit111.shinyapps.io/earthquakes_visualisation_with_shiny/)
 
+## Leaflet map of all earthquakes
 ![Screenshot](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/Screenshot%20from%202024-09-17%2016-24-51.png)
+## Most common areas 
+![Screenshot2](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/Screenshot%20from%202024-09-19%2015-55-58.png)
+## Magnitude-Depth relationship
+![Screenshot3](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/Screenshot%20from%202024-09-19%2016-06-32.png)
+
+
 
 ## Some insights 
