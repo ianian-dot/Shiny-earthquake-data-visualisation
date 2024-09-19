@@ -9,6 +9,12 @@ library(dplyr)
 library(plotly)
 library(DT)
 library(lubridate)
+library(countrycode)
+library(stringr)
+library(wordcloud)
+library(tm)
+
+set.seed(42)
 
 ## GETTING DATA ==============================
 
@@ -20,6 +26,7 @@ default_start = today - 365 ## a year ago
 n_days_ago <- function(n){
   today - days(n)
 }
+
 
 # Construct the query URL
 get_eq_data <- function(start_time , end_time){
@@ -37,72 +44,160 @@ get_eq_data <- function(start_time , end_time){
     data
 }
 
+## Larger wrapper function that retrieves data from a larger period of time 
+## by iteratively getting 1 month worth of data 
+get_longer_eq_data <- function(start_time, end_time){
+  if (!(is.Date(start_time) & is.Date(end_time))){
+    stop('Enter in proper dates for start and end time')
+     
+  }
+  start_time <- as.Date(start_time)
+  end_time <- as.Date(end_time)
+  
+  data_list <- list()
+  
+  ## Prepare for for loop
+  loop_start = start_time
+  i <- 1
+  
+  while (loop_start < end_time){
+    ## start with earliest
+    loop_end <- min(loop_start + days(29), end_time)
+    ## Call API function 
+    data <- get_eq_data(loop_start, loop_end)
+    ## DATA CLEANING STEPS 
+    features <-(data$features)
+    properties_df <- data.frame(features$properties)
+    geometry_df <- data.frame(features$geometry)
+    combined_df <- cbind(properties_df, geometry_df)
+    
+    ## Append cleaned df into data_list
+    data_list[[i]] <- combined_df
+    
+    ## Reset variables for next iteration
+    loop_start = loop_end + days(1)
+    Sys.sleep(5)#
+    i <- i+1
+  }
+  
+  full_data <- bind_rows(data_list) ## bind many dfs by row 
+  return(full_data)
+}
+
+## Test longer data 
+long_data <- get_longer_eq_data(n_days_ago(100), today)
+## check 
+dim(long_data)
+format(as.Date(range(as.POSIXct(long_data$time/1000, start = '1970-01-01'))), '%d %b %Y')
+
+## OLDER METHOD OF FETCHING LIMITED DATA ========================================
 ## Fetch data with user defined function
-data <- get_eq_data(n_days_ago(30),today)
-names(data)
-## One level down 
-features <-(data$features)
-
-## Two levels down 
-names(features)
-properties_df <- data.frame(features$properties)
-geometry_df <- data.frame(features$geometry)
-dim(properties_df) == dim(geometry_df)
-
+# data <- get_eq_data(n_days_ago(30),today)
+# ## One level down 
+# features <-(data$features)
+# ## Two levels down 
+# names(features)
+# properties_df <- data.frame(features$properties)
+# geometry_df <- data.frame(features$geometry)
+# dim(properties_df) == dim(geometry_df)
 ## Concatenate both properties and geometry dfs 
-combined_df <- cbind(properties_df, geometry_df)
-dim(combined_df) == dim(properties_df) ## same number of rows 
+# combined_df <- cbind(properties_df, geometry_df)
+# dim(combined_df) == dim(properties_df) ## same number of rows 
 
 # response <- GET(query_url)
 # data <- fromJSON(content(response, "text"), flatten = TRUE)
 # earthquakes <- data$features
 
-## METHOD 2 (get data from only the previous day) ===================================================
-# less recommended, since not much data 
-# response <- GET("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson")
-# data <- fromJSON(content(response, 'text'))
-
 ## Simple data exploration / Data cleaning =====================================================
 
-## Explore 
-earthquakes_df <- combined_df
-rm(combined_df)
-cat('Number of earthquakes in dataset: ', nrow(earthquakes_df), '\n')
-colnames(earthquakes_df) ## useful cols: mag, place, time, 
+cleaning_function <- function(df){
+  
+  ##1. remove useless cols (cols with only 1 value) 
+  more_than_1_cols <- sapply(df, function(x) length(unique(x)) > 1)
+  df <- df[more_than_1_cols]
+  
+  ##2. clean dates
+  df$time <- as.POSIXct(df$time/1000, origin = '1970-01-01') ## time are milliseconds since epoch i.e. 1 jan 1970 -- convert to seconds
+  df$date <- as.Date(df$time)
+  
+  ##3. extract coordinates 
+  df$longitude <- sapply(df$coordinates, FUN = function(x) x[1])
+  df$latitude <- sapply(df$coordinates, FUN = function(x) x[2])
+  df$depth <- sapply(df$coordinates, FUN = function(x) x[3])
 
-## Drop unwanted cols 
-# Cols that dont vary 
-more_than_1_cols <- sapply(earthquakes_df, function(x) length(unique(x)) > 1)
-earthquakes_df <- earthquakes_df[more_than_1_cols]
+  ##4. extract place
+  df$place <- as.character(df$place)
+  # Extract everything after the first comma and trim whitespace
+  df$country_US_state <- trimws(sub(".*?,", "", df$place))
+  
+  return(df)
+  
+}
 
-## Cleaning 
-earthquakes_df$time <- as.POSIXct(earthquakes_df$time/1000, origin = '1970-01-01') ## time are milliseconds since epoch i.e. 1 jan 1970 -- convert to seconds
-earthquakes_df$date <- as.Date(earthquakes_df$time)
-earthquakes_df$updated <- as.POSIXct(earthquakes_df$updated/1000, origin = '1970-01-01') ## time are milliseconds since epoch i.e. 1 jan 1970 -- convert to seconds
+## PLACES =============================== 
+## Examining places in df 
+earthquakes_df <- cleaning_function(long_data)
+places_unique <- unique(earthquakes_df$country_US_state)
 
-## Extract the coordinates individually 
-typeof(earthquakes_df$coordinates)
-earthquakes_df$longitude <- sapply(earthquakes_df$coordinates, FUN = function(x) x[1])
-earthquakes_df$latitude <- sapply(earthquakes_df$coordinates, FUN = function(x) x[2])
-earthquakes_df$depth <- sapply(earthquakes_df$coordinates, FUN = function(x) x[3])
-earthquakes_df <- earthquakes_df %>% select(-type)
+## Cleaning places in df 
+# note: I chose to exclude alaska and hawaii as it had so many of its own earthquakes, hence
+# i wanted to preserve that level of granularity instead of just including into a 
+# massive 'US' category
+us_states <- c("Alabama",  "Arizona", "Arkansas", "California", "Colorado",
+               "Connecticut", "Delaware", "Florida", "Georgia", "Idaho",
+               "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana",
+               "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
+               "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada",
+               "New Hampshire", "New Jersey", "New Mexico", "New York",
+               "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon",
+               "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota",
+               "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington",
+               "West Virginia", "Wisconsin", "Wyoming")
+state_abbr <- c("AL",  "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+                 "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+                "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+                "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+                "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY")
+ocean_keywords <- c('ridge', 'trench', 'ocean', 'sea', 'gulf', "island", "islands",
+                    "lake", "bay", "coast", "plateau", "rise")
+ocean_patterns <- paste0("\\b", ocean_keywords, "\\b")
+
+categorise_place <- function(place_name){
+  place_name <- trimws(tolower(place_name))
+  
+  ## 1. CATEGORISE AS UNITED STATES FOR MOST STATES 
+  if (place_name %in% tolower(us_states) || place_name %in% tolower(state_abbr)){
+    return('United States')
+  }
+  
+  ## 2. RETURN STANDARD NAME OF COUNTRY 
+  country <- countrycode(place_name, origin = 'country.name', 
+                         destination = 'country.name', 
+                         warn = F, 
+                         nomatch = NA)
+  # if valid country
+  if (!is.na(country)){
+    return(country)
+  }
+  
+  ## 3. OCEANIC REGIONS 
+  
+  if (any(stringr::str_detect(place_name, regex(ocean_patterns, ignore_case = T)))){
+    return('Oceanic Region')
+  }
+  
+  ## Default otherwise
+  return('Non-identified countries')
+}
+
+## Apply function
+s = Sys.time()
+earthquakes_df$place_cleaned <- sapply(earthquakes_df$country_US_state, categorise_place)
+e = Sys.time()
+e-s
 
 
-
-## Extract the area/region/state/country
-earthquakes_df['country_US_state'] = sapply(strsplit(earthquakes_df$place, ','), function(x)x[2])
-earthquakes_df['country_US_state'] = as.character(earthquakes_df['country_US_state'])
-earthquakes_df['country_US_state'] = as.character(trimws(earthquakes_df['country_US_state'], 
-                                             which = 'both'))
-unique_state_countries <- unique(earthquakes_df$country_US_state)
-
-## (More efficient method)
-earthquakes_df$place <- as.character(earthquakes_df$place)
-# Extract everything after the first comma and trim whitespace
-earthquakes_df$country_US_state <- trimws(sub(".*?,", "", earthquakes_df$place))
-unique_state_countries <- unique(earthquakes_df$country_US_state)
-
-## Missing values analysis 
+## Missing values analysis ====================
 na_counts_ordered <- colSums(is.na(earthquakes_df))[order(colSums(is.na(earthquakes_df)), decreasing = TRUE)]
 na_counts_positive <- na_counts_ordered[na_counts_ordered >0]
 barplot(na_counts_positive, ylim = c(0, nrow(earthquakes_df)+10), 
@@ -127,8 +222,11 @@ ggplot(earthquakes_df, aes(x = mag)) +
 ggplot(earthquakes_df, aes(x = longitude, y = latitude, colour =mag)) +
   geom_point() +
   theme_classic()
-
 ## ==== SHINY APP ========================================================
+
+## remove those without magnitudes 
+earthquakes_df <- earthquakes_df[!is.na(earthquakes_df$mag), ]
+
 ui <- fluidPage(
   titlePanel("Interactive Earthquake Data Explorer"),
   
@@ -138,9 +236,9 @@ ui <- fluidPage(
       ## for magnitude
       sliderInput("magRange", 
                  "Magnitude Range",
-                 min = min(earthquakes_df$mag), 
-                 max = max(earthquakes_df$mag),
-                 value = range(earthquakes_df$mag), 
+                 min = 0, 
+                 max = 8,
+                 value = c(0,8), 
                  step = 0.1),
       ## for date
       dateRangeInput("dateRange", ## enter date range to filter earthquakes
@@ -149,31 +247,28 @@ ui <- fluidPage(
                      end = max(earthquakes_df$time)
                      ),
       ## for tsunami related earthquakes (binary)
-      checkboxInput('showTsunami', "Show Only Tsunami-Related Earthquake"),
-      
-      ## add conditional pandel for second and third tabs: number of bins for histograms
-      conditionalPanel(
-        condition = "input.tabs == 'Magnitude Distribution' || input.tabs == 'Depth Distribution'",
-        sliderInput(inputId = 'histBins', 
-                    label = 'Number of bins', 
-                    min = 1,
-                    max = 40,
-                    step = 2, 
-                    value = 15 ##initial value of the slider
-                    ))
-      
-      ), 
+      checkboxInput('showTsunami', "Show Only Tsunami-Related Earthquake")
+      ),
+       
   
   mainPanel(
     tabsetPanel( ## organises outputs into TABS for easier management
+      ## first tab
       tabPanel("Map", ## name of the output tab
                ## insert plot object 
                leafletOutput("quakeMap", ##output name (from server)
                              height = 800)), ## all these ids will come from server functions
+      ## second tab -- 2 plots
+      tabPanel('Places with most earthquakes', 
+               plotOutput('wordCloud', height = '500px'),
+               plotOutput('barPlot', height = '400px')
+               ),
+      ## third tab
       tabPanel("Magnitude distribution", 
                plotlyOutput("magPlot")), 
       tabPanel("Depth Distribution", 
-               plotlyOutput("depthPlot")), 
+               plotlyOutput("depthPlot"), 
+               plotOutput('depthBoxplot')), 
       tabPanel("Mag - Depth Distribution", 
                plotlyOutput("magdepthPlot")), 
       tabPanel("Data Table", 
@@ -221,6 +316,37 @@ server <- function(input, output, session){
     
     })
   
+  ## 1.2: WORD CLOUD =================================================
+  output$wordCloud <- renderPlot({
+    req(filtered_data())
+    category_counts <- filtered_data() %>% count(country_US_state)
+    
+    set.seed(42)
+    wordcloud(words = category_counts$country_US_state, 
+              freq = category_counts$n, 
+              scale = c(5,1), 
+              colors = brewer.pal(8, "Dark2"), 
+              random.order = FALSE) ## number of colors in palette
+  })
+  
+  ## 1.3: BARPLOT =======================================================
+  output$barPlot <- renderPlot({
+    req(filtered_data()) 
+
+      top_places <- filtered_data() %>%
+      count(place_cleaned) %>%
+      arrange(desc(n)) %>%
+      slice_max(order_by = n, n = 5)
+      
+    
+    ggplot(top_places, aes(x = reorder(place_cleaned, n), y = n, fill = place_cleaned)) +
+      geom_bar(stat = "identity") +
+      coord_flip() +  # Flip coordinates to make it horizontal
+      labs(title = "Most Common Major Regions", x = "Region", y = "Count") +
+      theme_minimal() +
+      theme(legend.position = "none")  # Hide the legend
+  })
+  
   ## SECOND OUTPUT: HISTOGRAM OF MAGNITUDE ====================================
   output$magPlot <- renderPlotly({ ## use a plotly object for this plot
     p <- ggplot(filtered_data(), aes(x = mag)) +
@@ -235,38 +361,56 @@ server <- function(input, output, session){
     
   })
   
+  ## 2.2: Boxplot of DEPTH -- to show how many outliers there are 
+  output$depthBoxplot <- renderPlot({
+    ggplot(filtered_data(), aes(x = depth)) +
+      geom_boxplot(fill = 'skyblue', color = 'black', outlier.shape = 4) +
+      labs(y = '    ')
+      theme_bw() 
+  })
+  
   ## THIRD OUTPUT: DEPTH DISTRIBUTION
   output$depthPlot <- renderPlotly({
     filtered_data <- filtered_data()
-    q <- ggplot(filtered_data, aes(x= depth, y = 1)) +
-      geom_jitter(alpha = 0.1)+
-      geom_text(x = 500, y = 1.5, 
+    q <- ggplot(filtered_data, aes(x= depth)) +
+      geom_histogram(bins = 25)+
+      geom_text(x = 500, y= 15000, 
                 label= paste('Mean:', round(mean(filtered_data$depth, na.rm =T), 2), '\n', 
-                             'Median:', median(filtered_data$depth, na.rm = T))) + 
-      ylim(c(0,2)) +
-      labs(y = '')+
-      theme(axis.ticks.y = element_blank(),
-            axis.text.y = element_blank(), 
-            panel.background = element_rect(fill = 'white'), 
-            panel.grid.major = element_line(size = 0.4, 
-                                            color = 'grey'))
-    
+                             'Median:', median(filtered_data$depth, na.rm = T))) +
+      theme_bw()
+
     ## Insert ggplot object into plotly for interactive functionality
     ggplotly(q)
     
   })
   
-  ## FOURTH OUTPUT: MAG-DEPTH SCATTERPLOT
+  ## get top 5 most common earthquake areas 
+  top_places_data <- reactive({
+    data <- filtered_data()
+    
+    top_places <- data %>% count(place_cleaned, sort = T) %>% 
+      top_n(8,n) %>% 
+      pull(place_cleaned)
+    
+    # set the rest to others
+    data <- data %>% mutate(region = ifelse(place_cleaned %in% top_places,
+                                                   place_cleaned, 'Other'))
+    
+    return(data)
+    
+    })
+  
+  ## FOURTH OUTPUT: MAG-DEPTH SCATTERPLOT ======================================
   output$magdepthPlot <- renderPlotly({
-   o <- ggplot(filtered_data(), aes(x = depth, y = mag))+
-     geom_point(size = 0.5) +
-     geom_smooth(method = 'loess',color = 'darkblue', 
+   o <- ggplot(top_places_data(), aes(x = depth, y = mag))+
+     geom_point(aes(color = (region)),
+                size = 0.5, alpha = 0.5) +
+     geom_smooth(aes(group = 1), ## in order to plot one geom_smooth line instead of many (one per region) 
+                 method = 'loess',color = 'darkblue',
                  method.args = list(degree = 1))+
+     guides(color = guide_legend(title = 'Region'))+
      # geom_smooth(method = 'lm',color = 'lightblue')+
-     ## add legend for both lines
-     scale_color_manual(name = 'Line fit', 
-                        values = c('Loess' = 'darkblue', 
-                                   'LM' = 'lightblue'))+
+     ## add legend for both lines +
      theme_classic()
    
    ggplotly(o)
@@ -274,39 +418,15 @@ server <- function(input, output, session){
   
   ## FIFTH OUTPUT: SUMMARY TABLE
   output$dataTable <- renderDataTable({
-    filtered_data() %>%
-      select(time, mag, depth, place, tsunami) %>%
-      arrange(desc(time))
+    summary(filtered_data() %>%
+      select(time, mag, depth, place, tsunami))
+      
   })
 }
 
 shinyApp(ui = ui, server = server)
 
 
-## Testing the plots 
-leaflet(data = earthquakes_df) %>% addTiles() %>% 
-  addCircles(lng = ~longitude, 
-             lat = ~latitude, 
-             radius = ~ ifelse(mag <1, 2, mag*2), ## set a lower limit to 2, and then multiply the size of the rest by 2
-             color = ~ifelse(mag > 5, 'red', ifelse(mag >3, 'orange', 'green')), 
-             # stroke = FALSE, ## for the borders of circles 
-             popup = ~paste0( ##pop up message for more info 
-               "<strong>Location: </strong>", place, "<br>", 
-               "<strong>Magnitude: </strong>", mag, "<br>", 
-               "<strong>Depth: </strong>", depth, "<br>", 
-               "<strong>Time: </strong>", time, "<br>" 
-             )) %>% 
-  addLegend(position = 'bottomright', 
-            colors = c('red', 'orange', 'green'), ## add legend for the coloring used in addCircles
-            labels = c('Magnitude >5','Magnitude 3-5', 'Magnitude <3' ))
-
-
-url <- "https://earthquake.usgs.gov/earthquakes/feed/v1.0/detail/ci40734959.geojson"
-response <- GET(url)
-data <- fromJSON(content(response, 'text'))
-data$
-
-GET()
 
 ######## APPENDIX ##############################################################
 ######## APPENDIX ##############################################################
@@ -339,69 +459,69 @@ GET()
 # ## Combine the two tables into one to include geometrical information (longitude and latitude)
 # dim(cbind(properties_df, geometry_df)) ##verify 
 # earthquakes_df <- cbind(properties_df, geometry_df)
-
-server_2 <- function(input, output, session){
-  
-  # Filtering based on user inputs
-  filtered_data <- reactive({
-    data <- earthquakes_df %>% filter(
-      mag >= input$magRange[1],
-      mag <= input$magRange[2], 
-      time >= input$dateRange[1], 
-      time <= input$dateRange[2]
-    )
-    if (input$showTsunami){ 
-      data <- data %>% filter(tsunami == 1)
-    }
-    data
-  })
-  
-  # Initialize the map
-  output$quakeMap <- renderLeaflet({
-    leaflet() %>% 
-      addTiles() %>% 
-      setView(lng = mean(earthquakes_df$longitude, na.rm = TRUE), 
-              lat = mean(earthquakes_df$latitude, na.rm = TRUE), 
-              zoom = 2) %>%
-      addLegend(position = 'bottomright', 
-                colors = c('red', 'orange', 'green'),
-                labels = c('Magnitude >5', 'Magnitude 3-5', 'Magnitude <3'),
-                title = "Earthquake Magnitude")
-  })
-  
-  # Update the map based on filtered data
-  observe({
-    data <- filtered_data()
-    
-    leafletProxy("quakeMap", data = data) %>%
-      clearMarkers() %>%
-      clearShapes() %>%
-      addCircles(
-        lng = ~longitude, 
-        lat = ~latitude, 
-        radius = ~ifelse(mag < 1, 20000, mag * 20000),
-        color = ~ifelse(mag > 5, 'red', ifelse(mag > 3, 'orange', 'green')),
-        stroke = FALSE,
-        fillOpacity = 0.6,
-        popup = ~paste0(
-          "<strong>Location: </strong>", place, "<br>", 
-          "<strong>Magnitude: </strong>", mag, "<br>", 
-          "<strong>Depth: </strong>", depth, "<br>", 
-          "<strong>Time: </strong>", time, "<br>"
-        )
-      )
-  })
-}
-
-ggplot(earthquakes_df, aes(x= depth, y = 1)) +
-  geom_jitter(alpha = 0.1)+
-  ylim(c(0,2)) +
-  labs(y = '')+
-  theme(axis.ticks.y = element_blank(),
-        axis.text.y = element_blank(), 
-        panel.background = element_rect(fill = 'white'), 
-        panel.grid.major = element_line(size = 0.4, 
-                                        color = 'grey'))
-
-ggplot(earthquakes_df, aes(x= depth))+
-  geom_histogram()
+# 
+# server_2 <- function(input, output, session){
+#   
+#   # Filtering based on user inputs
+#   filtered_data <- reactive({
+#     data <- earthquakes_df %>% filter(
+#       mag >= input$magRange[1],
+#       mag <= input$magRange[2], 
+#       time >= input$dateRange[1], 
+#       time <= input$dateRange[2]
+#     )
+#     if (input$showTsunami){ 
+#       data <- data %>% filter(tsunami == 1)
+#     }
+#     data
+#   })
+#   
+#   # Initialize the map
+#   output$quakeMap <- renderLeaflet({
+#     leaflet() %>% 
+#       addTiles() %>% 
+#       setView(lng = mean(earthquakes_df$longitude, na.rm = TRUE), 
+#               lat = mean(earthquakes_df$latitude, na.rm = TRUE), 
+#               zoom = 2) %>%
+#       addLegend(position = 'bottomright', 
+#                 colors = c('red', 'orange', 'green'),
+#                 labels = c('Magnitude >5', 'Magnitude 3-5', 'Magnitude <3'),
+#                 title = "Earthquake Magnitude")
+#   })
+#   
+#   # Update the map based on filtered data
+#   observe({
+#     data <- filtered_data()
+#     
+#     leafletProxy("quakeMap", data = data) %>%
+#       clearMarkers() %>%
+#       clearShapes() %>%
+#       addCircles(
+#         lng = ~longitude, 
+#         lat = ~latitude, 
+#         radius = ~ifelse(mag < 1, 20000, mag * 20000),
+#         color = ~ifelse(mag > 5, 'red', ifelse(mag > 3, 'orange', 'green')),
+#         stroke = FALSE,
+#         fillOpacity = 0.6,
+#         popup = ~paste0(
+#           "<strong>Location: </strong>", place, "<br>", 
+#           "<strong>Magnitude: </strong>", mag, "<br>", 
+#           "<strong>Depth: </strong>", depth, "<br>", 
+#           "<strong>Time: </strong>", time, "<br>"
+#         )
+#       )
+#   })
+# }
+# 
+# ggplot(earthquakes_df, aes(x= depth, y = 1)) +
+#   geom_jitter(alpha = 0.1)+
+#   ylim(c(0,2)) +
+#   labs(y = '')+
+#   theme(axis.ticks.y = element_blank(),
+#         axis.text.y = element_blank(), 
+#         panel.background = element_rect(fill = 'white'), 
+#         panel.grid.major = element_line(size = 0.4, 
+#                                         color = 'grey'))
+# 
+# ggplot(earthquakes_df, aes(x= depth))+
+#   geom_histogram()
