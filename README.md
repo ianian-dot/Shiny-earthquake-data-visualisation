@@ -19,3 +19,14 @@ Steps
 
 
 ## Some insights 
+1. Shallow and weaker earthquakes: Dominated by USA, Alaska
+![Screenshot4](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/shallow-weak.png)
+
+2. Shallow and strong: Mostly on the left of the Pacific Ring, with a notable amount in oceanic regions
+![Screenshot5](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/shallow-strong.png)
+
+3. Deep but weak: Rare, as seem in mag-depth distribution (2 are found near Japan/Russia)
+![Screenshot5](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/deep-weak.png)
+
+4. Worst earthquakes: Found in Japan, Fiji and Phillipines
+![Screenshot5](https://github.com/ianian-dot/Shiny-earthquake-data-visualisation/blob/main/deep-strong.png)
